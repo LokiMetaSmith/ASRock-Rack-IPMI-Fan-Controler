@@ -1,0 +1,18 @@
+# --- Local Configuration ---
+# Never commit the actual configuration file.
+# We will use a template file instead (config.ini.example).
+config.ini
+
+# --- Python ---
+# Ignore Python's cache and virtual environment files
+__pycache__/
+*.pyc
+venv/
+*.venv/
+env/
+*.env/
+
+# --- IDE/Editor ---
+# Ignore common editor-specific folders
+.vscode/
+.idea/
