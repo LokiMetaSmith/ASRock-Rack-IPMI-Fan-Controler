@@ -29,9 +29,10 @@ import sys
 # --- Configuration ---
 # The configuration file is expected to be in the same directory as the script.
 # This makes it easier to manage when installed.
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-CONFIG_FILE = os.path.join(SCRIPT_DIR, 'config.ini')
-
+#SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+#CONFIG_FILE = os.path.join(SCRIPT_DIR, 'config.ini')
+# The configuration file is now expected in a standard system location.
+CONFIG_FILE = '/etc/ipmi-fan-control/config.ini'
 def main():
     """Main execution function."""
     print("--- Starting IPMI Fan Control Script ---")
