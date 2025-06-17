@@ -1,61 +1,76 @@
 #!/bin/bash
-
-# This script installs the IPMI fan control service.
-# It must be run with root privileges (e.g., using sudo).
+#
+# IPMI Fan Control Service Installer
+# ----------------------------------
+# This script installs the fan control script and systemd service.
+# It is designed to be run from a cloned Git repository.
 
 set -e
 
-# --- Check for Root ---
+# --- Configuration ---
+SCRIPT_NAME="fan_control.py"
+SERVICE_NAME="ipmi-fan-control.service"
+CONFIG_TEMPLATE="config.ini.example"
+
+# Destination Paths
+INSTALL_DIR="/usr/local/sbin"
+SERVICE_DIR="/etc/systemd/system"
+CONFIG_DIR="/etc/ipmi-fan-control"
+
+# Full paths for destination files
+SCRIPT_DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
+SERVICE_DEST="${SERVICE_DIR}/${SERVICE_NAME}"
+CONFIG_DEST="${CONFIG_DIR}/config.ini"
+
+# --- Sanity Checks ---
 if [ "$EUID" -ne 0 ]; then
-  echo "Please run this script as root or with sudo."
+  echo "ERROR: Please run this script as root or with sudo."
   exit 1
 fi
 
-echo "--- Installing IPMI Fan Control Service ---"
-
-# --- Define Paths ---
-# Standard location for locally installed admin scripts
-SCRIPT_DEST="/usr/local/sbin/fan_control.py"
-# Standard location for systemd service files
-SERVICE_DEST="/etc/systemd/system/ipmi-fan-control.service"
-# The Python script in the current directory
-SCRIPT_SRC="fan_control.py"
-# The service file in the current directory
-SERVICE_SRC="ipmi-fan-control.service"
-
-# --- Check if Source Files Exist ---
-if [ ! -f "$SCRIPT_SRC" ] || [ ! -f "$SERVICE_SRC" ]; then
-    echo "ERROR: Make sure fan_control.py and ipmi-fan-control.service are in the same directory as this script."
+if [ ! -f "$SCRIPT_NAME" ] || [ ! -f "$SERVICE_NAME" ] || [ ! -f "$CONFIG_TEMPLATE" ]; then
+    echo "ERROR: Missing required files. Please run this script from the root of the Git repository."
     exit 1
 fi
 
-# --- Copy Files and Set Permissions ---
+echo "--- Installing/Updating IPMI Fan Control Service ---"
+
+# --- Install Script and Service ---
 echo "Copying script to $SCRIPT_DEST..."
-cp "$SCRIPT_SRC" "$SCRIPT_DEST"
+cp "$SCRIPT_NAME" "$SCRIPT_DEST"
 chmod 755 "$SCRIPT_DEST"
 
 echo "Copying systemd service file to $SERVICE_DEST..."
-cp "$SERVICE_SRC" "$SERVICE_DEST"
+cp "$SERVICE_NAME" "$SERVICE_DEST"
 
-# --- Reload systemd ---
-echo "Reloading systemd daemon..."
+# --- Handle Configuration File ---
+# Create the configuration directory if it doesn't exist.
+if [ ! -d "$CONFIG_DIR" ]; then
+    echo "Creating configuration directory: $CONFIG_DIR"
+    mkdir -p "$CONFIG_DIR"
+fi
+
+# Only create the config file from the template if it doesn't already exist.
+# This preserves user settings during updates.
+if [ ! -f "$CONFIG_DEST" ]; then
+    echo "No existing configuration found. Creating new config from template..."
+    cp "$CONFIG_TEMPLATE" "$CONFIG_DEST"
+    echo "IMPORTANT: Please edit your new configuration file at $CONFIG_DEST"
+else
+    echo "Existing configuration at $CONFIG_DEST found. Skipping creation."
+fi
+
+# --- Finalize ---
+echo "Reloading systemd daemon to recognize changes..."
 systemctl daemon-reload
 
 echo ""
-echo "--- Installation Complete ---"
+echo "--- Installation/Update Complete ---"
 echo ""
-echo "NEXT STEPS:"
-echo "1. Your fan speeds are currently set in the local 'config.ini' file."
-echo "   Please move this file to '/etc/fan_control.ini' or a location of your choice"
-echo "   and update the CONFIG_FILE path in $SCRIPT_DEST."
+echo "To finish setup (if this is a first-time install):"
+echo "1. Edit the configuration: sudo nano $CONFIG_DEST"
+echo "2. Enable the service to start on boot: sudo systemctl enable $SERVICE_NAME"
+echo "3. Start the service now: sudo systemctl start $SERVICE_NAME"
 echo ""
-echo "2. Enable the service to start on boot:"
-echo "   sudo systemctl enable ipmi-fan-control.service"
-echo ""
-echo "3. Start the service immediately to test it:"
-echo "   sudo systemctl start ipmi-fan-control.service"
-echo ""
-echo "4. Check the service status to see if it ran correctly:"
-echo "   sudo systemctl status ipmi-fan-control.service"
-echo "   journalctl -u ipmi-fan-control.service"
+echo "To check status, run: sudo systemctl status $SERVICE_NAME"
 echo ""
