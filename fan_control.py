@@ -2,40 +2,127 @@
 # -*- coding: utf-8 -*-
 
 """
-ASRock Rack IPMI Fan Controller
--------------------------------
+ASRock Rack IPMI Fan Controller (Dynamic)
+-----------------------------------------
 
-This script sends a raw IPMI command to set the fan speeds on certain
-ASRock Rack motherboards that use the 0x3a NetFn for fan control.
+This script runs as a daemon to dynamically control fan speeds on certain
+ASRock Rack motherboards based on system temperature. It sends raw IPMI
+commands (NetFn 0x3a, Cmd 0x01) to set fan speeds.
 
-It is designed to be run as a systemd service at boot.
-
-The script reads its settings from a 'config.ini' file located in the
-same directory. This allows for easy configuration of fan speeds and IPMI
-interface settings without modifying the script itself.
+The script reads its settings from '/etc/ipmi-fan-control/config.ini'.
 
 Prerequisites:
 - Python 3
-- ipmitool installed and in the system's PATH
-- The necessary IPMI kernel modules loaded if using the 'open' interface
-  (e.g., ipmi_devintf, ipmi_si, ipmi_msghandler)
+- ipmitool
+- lm-sensors (for temperature reading)
 """
 
 import subprocess
 import configparser
 import os
 import sys
+import time
+import re
 
-# --- Configuration ---
-# The configuration file is expected to be in the same directory as the script.
-# This makes it easier to manage when installed.
-#SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-#CONFIG_FILE = os.path.join(SCRIPT_DIR, 'config.ini')
-# The configuration file is now expected in a standard system location.
+# --- Constants ---
 CONFIG_FILE = '/etc/ipmi-fan-control/config.ini'
+DEFAULT_IPMITOOL_PATH = '/usr/bin/ipmitool'
+DEFAULT_INTERFACE = 'open'
+FAILSAFE_SPEED_PERCENT = 75
+
+def get_cpu_temperature():
+    """
+    Retrieves the CPU package temperature by parsing the output of `sensors`.
+
+    If `sensors` is not available or fails, or if no temperature is found,
+    it falls back to a mocked value for testing purposes.
+
+    :return: The CPU temperature in degrees Celsius as a float, or a mocked value.
+    """
+    try:
+        # Setting check=False because `sensors` can return a non-zero exit code
+        # if no sensors are found, but we want to handle that gracefully.
+        result = subprocess.run(['sensors'], capture_output=True, text=True, check=False)
+        output = result.stdout
+
+        # Example `sensors` output:
+        # Package id 0:  +58.0°C  (high = +80.0°C, crit = +100.0°C)
+        # Core 0:        +55.0°C  (high = +80.0°C, crit = +100.0°C)
+
+        # Regex to find the 'Package id 0' temperature, a good overall CPU temp.
+        match = re.search(r"Package id 0:\s*\+([\d\.]+)", output)
+        if match:
+            temp_str = match.group(1)
+            return float(temp_str)
+        
+        # Fallback regex for 'Core 0' if 'Package' isn't available.
+        match = re.search(r"Core 0:\s*\+([\d\.]+)", output)
+        if match:
+            temp_str = match.group(1)
+            return float(temp_str)
+
+        print("WARN: Could not parse CPU temperature from `sensors` output.", file=sys.stderr)
+
+    except FileNotFoundError:
+        print("WARN: `sensors` command not found.", file=sys.stderr)
+
+    # --- Mocked Fallback ---
+    print("INFO: Using mocked temperature reading of 55.0°C.")
+    return 55.0
+
+def execute_ipmi_command(ipmitool_path, interface, fan_speeds_hex):
+    """
+    Builds and executes the raw IPMI command to set fan speeds.
+
+    :param ipmitool_path: Path to the ipmitool executable.
+    :param interface: IPMI interface to use (e.g., 'open').
+    :param fan_speeds_hex: A list of 8 hexadecimal speed values (e.g., ['0x32', '0x32', ...]).
+    """
+    command = [
+        ipmitool_path,
+        '-I', interface,
+        'raw', '0x3a', '0x01',
+    ] + fan_speeds_hex
+
+    try:
+        # Using subprocess.run for simplicity
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        # A successful raw command usually returns no output, so we don't print success unless verbose.
+    except FileNotFoundError:
+        print(f"ERROR: The command '{ipmitool_path}' was not found.", file=sys.stderr)
+        # Exit here because if ipmitool is missing, even the failsafe will fail.
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        print("ERROR: ipmitool command failed.", file=sys.stderr)
+        print(f"  Return Code: {e.returncode}", file=sys.stderr)
+        print(f"  Command: {' '.join(command)}", file=sys.stderr)
+        print(f"  Stderr: {e.stderr.strip()}", file=sys.stderr)
+        print(f"  Stdout: {e.stdout.strip()}", file=sys.stderr)
+
+
+def set_all_fans_to_speed(ipmitool_path, interface, speed_percent):
+    """
+    Sets all 8 fans to a single specified speed.
+
+    :param ipmitool_path: Path to the ipmitool executable.
+    :param interface: IPMI interface to use.
+    :param speed_percent: The desired fan speed (0-100).
+    """
+    if not 0 <= speed_percent <= 100:
+        print(f"WARN: Requested speed {speed_percent}% is out of range (0-100). Clamping.", file=sys.stderr)
+        speed_percent = max(0, min(100, speed_percent))
+
+    hex_speed = hex(speed_percent)
+    # The IPMI command requires a speed value for each of the 8 fans.
+    fan_speeds_hex = [hex_speed] * 8
+
+    print(f"Setting all fans to {speed_percent}% ({hex_speed}).")
+    execute_ipmi_command(ipmitool_path, interface, fan_speeds_hex)
+
+
 def main():
-    """Main execution function."""
-    print("--- Starting IPMI Fan Control Script ---")
+    """Main execution function, runs in a loop."""
+    print("--- Starting IPMI Fan Control Daemon ---")
 
     # --- Read Configuration ---
     config = configparser.ConfigParser()
@@ -45,66 +132,65 @@ def main():
 
     try:
         config.read(CONFIG_FILE)
-        
-        # Get IPMI settings
-        ipmitool_path = config.get('Settings', 'ipmitool_path', fallback='/usr/bin/ipmitool')
-        interface = config.get('Settings', 'interface', fallback='open')
 
-        # Get the fan speeds. We expect 8 fan values.
-        fan_speeds_percent = [
-            config.getint('FanSpeeds', f'fan_{i}') for i in range(1, 9)
-        ]
-    except (configparser.NoSectionError, configparser.NoOptionError) as e:
-        print(f"ERROR: Configuration error in '{CONFIG_FILE}': {e}", file=sys.stderr)
+        # Get settings
+        ipmitool_path = config.get('Settings', 'ipmitool_path', fallback=DEFAULT_IPMITOOL_PATH)
+        interface = config.get('Settings', 'interface', fallback=DEFAULT_INTERFACE)
+        check_interval = config.getint('Settings', 'check_interval', fallback=10)
+
+        # Get dynamic control settings
+        low_temp = config.getint('DynamicControl', 'low_temp')
+        high_temp = config.getint('DynamicControl', 'high_temp')
+        low_speed = config.getint('DynamicControl', 'low_speed')
+        high_speed = config.getint('DynamicControl', 'high_speed')
+
+    except (configparser.Error, ValueError) as e:
+        print(f"ERROR: Invalid or missing configuration in '{CONFIG_FILE}': {e}", file=sys.stderr)
         sys.exit(1)
-    except ValueError as e:
-        print(f"ERROR: Invalid number in [FanSpeeds] section of '{CONFIG_FILE}': {e}", file=sys.stderr)
-        sys.exit(1)
 
-    print(f"Using IPMI interface: {interface}")
-    print(f"Desired fan speeds (%): {fan_speeds_percent}")
+    # Initial fan speed state. Start with low speed.
+    current_speed_percent = low_speed
+    print(f"Initial fan speed set to {current_speed_percent}%.")
+    set_all_fans_to_speed(ipmitool_path, interface, current_speed_percent)
 
-    # --- Build IPMI Command ---
-    # Base command structure
-    command = [
-        ipmitool_path,
-        '-I', interface,
-        'raw', '0x3a', '0x01'
-    ]
-
-    # Convert percentage speeds to hex and add to the command
-    for speed in fan_speeds_percent:
-        if not 0 <= speed <= 100:
-            print(f"ERROR: Fan speed {speed}% is out of range. Must be between 0 and 100.", file=sys.stderr)
-            sys.exit(1)
-        # Convert the integer percentage to a hexadecimal string (e.g., 50 -> "0x32")
-        hex_speed = hex(speed)
-        command.append(hex_speed)
-
-    print(f"Executing command: {' '.join(command)}")
-
-    # --- Execute Command ---
     try:
-        # Run the command. check=True will raise an exception if the command fails.
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        print("SUCCESS: IPMI command sent successfully.")
-        if result.stdout:
-            print(f"Output: {result.stdout.strip()}")
+        # The main control loop
+        while True:
+            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] ---")
 
-    except FileNotFoundError:
-        print(f"ERROR: The command '{ipmitool_path}' was not found.", file=sys.stderr)
-        print("Please ensure 'ipmitool' is installed and the path in config.ini is correct.", file=sys.stderr)
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        # This block catches errors from ipmitool itself (e.g., 'Invalid command')
-        print("ERROR: ipmitool command failed.", file=sys.stderr)
-        print(f"Return Code: {e.returncode}", file=sys.stderr)
-        print(f"Stderr: {e.stderr.strip()}", file=sys.stderr)
-        print(f"Stdout: {e.stdout.strip()}", file=sys.stderr)
-        print("Troubleshooting: Is the IPMI interface correct? Are kernel modules loaded for '-I open'?", file=sys.stderr)
-        sys.exit(1)
+            # Read the temperature
+            current_temp = get_cpu_temperature()
+            print(f"Current temp: {current_temp}°C. Current fan speed: {current_speed_percent}%. Thresholds: [low: {low_temp}°C, high: {high_temp}°C]")
 
-    print("--- IPMI Fan Control Script Finished ---")
+            # Hysteresis logic
+            new_speed_percent = current_speed_percent
+            if current_temp >= high_temp and current_speed_percent != high_speed:
+                new_speed_percent = high_speed
+                print(f"Action: Temp is >= high threshold. Changing speed to HIGH ({new_speed_percent}%).")
+            elif current_temp < low_temp and current_speed_percent != low_speed:
+                new_speed_percent = low_speed
+                print(f"Action: Temp is < low threshold. Changing speed to LOW ({new_speed_percent}%).")
+            else:
+                print("Action: Temp is within thresholds. Maintaining current speed.")
+
+            if new_speed_percent != current_speed_percent:
+                set_all_fans_to_speed(ipmitool_path, interface, new_speed_percent)
+                current_speed_percent = new_speed_percent
+
+            print(f"Waiting for {check_interval} seconds...")
+            time.sleep(check_interval)
+
+    except KeyboardInterrupt:
+        print("\nDaemon stopped by user. Setting fans to failsafe speed.")
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}", file=sys.stderr)
+        print("Setting fans to failsafe speed.")
+    finally:
+        print(f"Executing failsafe: setting all fans to {FAILSAFE_SPEED_PERCENT}%...")
+        # Use the configured ipmitool_path and interface for the failsafe if available
+        set_all_fans_to_speed(ipmitool_path, interface, FAILSAFE_SPEED_PERCENT)
+        print("--- IPMI Fan Control Daemon Finished ---")
+
 
 if __name__ == "__main__":
     main()

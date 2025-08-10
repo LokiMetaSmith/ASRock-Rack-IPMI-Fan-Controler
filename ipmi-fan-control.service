@@ -1,16 +1,19 @@
 [Unit]
-Description=IPMI Fan Control Service
+Description=IPMI Fan Control Daemon
 # This service will start after the system reaches the multi-user stage.
-# If you use the 'lanplus' interface, you might change this to:
-# After=network-online.target
-# Wants=network-online.target
+# If you use the 'lanplus' interface, you might need network access.
 After=multi-user.target
 
 [Service]
-Type=oneshot
-# The absolute path to the python script that will be executed.
-# We will place the script in /usr/local/sbin/.
+# 'simple' is for services that are long-running processes.
+Type=simple
+
+# The absolute path to the python script.
 ExecStart=/usr/bin/python3 /usr/local/sbin/fan_control.py
+
+# Restart the service automatically if it fails.
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
